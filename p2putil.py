@@ -90,6 +90,7 @@ def enable_all(ng=None):
                     continue
             except Exception:
                 continue
-            if enable_p2p(i, j) in (0, 704, None):
+            # None 是"没加载起 libcudart、只能指望 PyTorch 隐式启用"，计进"显式启用成功"是假阳性
+            if enable_p2p(i, j) in (0, 704):
                 n += 1
     return n

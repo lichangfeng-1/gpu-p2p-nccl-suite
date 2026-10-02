@@ -26,6 +26,7 @@ case "$1" in
            exit 0 ;;
   version) echo "${STUB_DOCKER_VER:-29.8.0}" ;;
   image)   [ "${STUB_IMAGE:-present}" = present ] ;;
+  pull)    if [ "${STUB_PULL:-ok}" = ok ]; then echo "pull $2"; else echo "stub: pull denied" >&2; exit 1; fi ;;
   *)       exit 0 ;;
 esac
 EOS
@@ -153,6 +154,41 @@ mkdir -p "$T/suite" && cp "$SRC"/run_all-v2.sh "$SRC"/run_suite-inside-v1.sh "$S
 STUB_DOCKER=no_daemon STUB_PY=notorch OUT="$T/s9.log" PARSE_ONLY=0 bash "$T/suite/run_all-v2.sh" > "$T/s9.out" 2>&1; chk T9 4 $?
 has "缺门禁的标注" "$T/s9.log" "跳过对齐门禁"
 has "无后端结论" "$T/s9.log" "SKIP_NO_BACKEND"
+
+echo "=== T10 默认镜像也要能吃 mirror 前缀；pull 失败不得记成 OK（回归） ==="
+L="$T/t10.log"
+STUB_DOCKER=ok STUB_IMAGE=absent STUB_PULL=fail P2P_IMAGE_MIRRORS=mirror.example \
+  OSREL="$T/osrel.ubuntu2404" OUT="$L" bash "$SRC/run_all-v2.sh" --pull --yes > "$T/t10.out" 2>&1
+chk T10 3 $?
+has "候选含 mirror 前缀" "$L" "P2P_PULL_BEGIN mirror.example/pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime"
+has "失败被记成 FAIL" "$L" "P2P_PULL_FAIL mirror.example/pytorch/pytorch"
+if grep -aq "P2P_PULL_OK" "$L"; then echo "FAIL 拉取失败却记了 P2P_PULL_OK"; FAIL=$((FAIL+1)); else echo "PASS 无假 P2P_PULL_OK"; PASS=$((PASS+1)); fi
+
+echo "=== T11 TORCH_IMG 含分号/空格 → 拒在门禁之前（命令卡注入面） ==="
+rm -f /tmp/p2p-stub-pwned
+TORCH_IMG='pytorch/pytorch; touch /tmp/p2p-stub-pwned' bash "$SRC/run_all-v2.sh" > "$T/t11.out" 2>&1; chk T11 2 $?
+[ -e /tmp/p2p-stub-pwned ] && { echo "FAIL 非法镜像名里的命令被执行了"; FAIL=$((FAIL+1)); } || { echo "PASS 未被执行"; PASS=$((PASS+1)); }
+
+echo "=== T12 OUT 指向已存在的非空非 .log 文件 → 拒绝覆盖 ==="
+printf 'user-data\n' > "$T/precious.txt"
+OUT="$T/precious.txt" bash "$SRC/run_all-v2.sh" > "$T/t12.out" 2>&1; chk T12 2 $?
+if [ "$(cat "$T/precious.txt")" = "user-data" ]; then echo "PASS 原文件未被截断"; PASS=$((PASS+1)); else echo "FAIL 原文件被日志覆盖"; FAIL=$((FAIL+1)); fi
+
+echo "=== T13 设了 floor 但没解析到数据 → 不达标（没数据不等于通过） ==="
+{ echo "===== NCCL BANDWIDTH (all_reduce, all GPUs) ====="
+  echo "      size |        bytes |  algbw GB/s |  busbw GB/s"
+  echo "===== P2P BANDWIDTH (1 GiB, both directions + bidirectional) ====="
+  echo "   pair |   1GiB i->j |   1GiB j->i |  bidir GB/s"
+  echo "===== MULTI-STREAM CONCURRENT P2P ====="
+  echo "判读: 全连通 — 但带宽段一行都没有"; } > "$T/nodata.log"
+OUT="$T/nodata.log" PARSE_ONLY=1 P2P_FLOOR_GBPS=5 bash "$SRC/run_all-v2.sh" > "$T/t13.out" 2>&1; chk T13 8 $?
+has "NA 也判不达" "$T/nodata.log" "min=NA"
+
+echo "=== T14 连通性 PASS 但有段失败 → 降为 rc=1，不报全绿 ==="
+fix "$T/sf.log" "   0->1 |       13.16 |        6.59 |       13.15" "    32MiB |     33554432 |       12.10 |       11.53" "判读: 全连通 — P2P mesh 完整"
+printf 'STAGE_FAIL NCCL BANDWIDTH (all_reduce, all GPUs)\n' >> "$T/sf.log"
+OUT="$T/sf.log" PARSE_ONLY=1 bash "$SRC/run_all-v2.sh" > "$T/t14.out" 2>&1; chk T14 1 $?
+has "降级结论行" "$T/sf.log" "PASS_WITH_STAGE_FAILS"
 
 echo ""
 echo "PASS=$PASS FAIL=$FAIL"

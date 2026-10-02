@@ -37,6 +37,10 @@ done
 case "$BACKEND" in auto|docker|podman|native) ;; *) echo "--backend 只接受 auto|docker|podman|native"; exit 2 ;; esac
 
 TORCH_IMG="${TORCH_IMG:-${IMAGE:-pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime}}"
+# 镜像引用会被打进"给你复制执行的命令卡"，含 ; 或换行就等于把命令卡变成另一条命令
+case "$TORCH_IMG" in
+  ""|*[!A-Za-z0-9._:/@+-]*) echo "!! TORCH_IMG 含非法字符（只允许 字母数字 . _ : / @ + -）：$TORCH_IMG"; exit 2 ;;
+esac
 NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 OUT="${OUT:-$SRC/p2p-suite-$(date +%Y%m%d-%H%M%S).log}"
 P2P_FLOOR_GBPS="${P2P_FLOOR_GBPS:-0}"
@@ -66,13 +70,22 @@ parse_and_verdict(){
   FAIL=0
   if [ -n "$MINBW" ]; then
     awk -v v="$MINBW" -v f="$P2P_FLOOR_GBPS" 'BEGIN{exit !(v+0<f+0)}' && { emit "P2P_FLOOR_FAIL min=$MINBW < floor=$P2P_FLOOR_GBPS"; FAIL=1; }
+  elif awk -v f="$P2P_FLOOR_GBPS" 'BEGIN{exit !(f+0>0)}'; then
+    emit "P2P_FLOOR_FAIL min=NA 而 floor=$P2P_FLOOR_GBPS（没数据不等于达标）"; FAIL=1
   fi
   if [ -n "$BUS" ]; then
     awk -v v="$BUS" -v f="$NCCL_FLOOR_GBPS" 'BEGIN{exit !(v+0<f+0)}' && { emit "NCCL_FLOOR_FAIL busbw=$BUS < floor=$NCCL_FLOOR_GBPS"; FAIL=1; }
+  elif awk -v f="$NCCL_FLOOR_GBPS" 'BEGIN{exit !(f+0>0)}'; then
+    emit "NCCL_FLOOR_FAIL busbw=NA 而 floor=$NCCL_FLOOR_GBPS（没数据不等于达标）"; FAIL=1
   fi
   if [ "$FAIL" = 1 ]; then emit "P2P_RESULT=FAIL_FLOOR（低于你设的下限：吞吐不达，别当作通过）"; exit 8; fi
+  # 连通性判读过了不等于整轮过了：带宽/NCCL 段 STAGE_FAIL 时结论是残缺的，别报 0
+  SF=$(grep -ac '^STAGE_FAIL' "$OUT" 2>/dev/null); SF=${SF:-0}
   case "$VERDICT" in
-    *全连通*) emit "P2P_RESULT=PASS"; exit 0 ;;
+    *全连通*) if [ "$SF" != 0 ]; then
+        emit "P2P_RESULT=PASS_WITH_STAGE_FAILS（连通性通过，但有 $SF 段失败：带宽/NCCL 结论不完整）"; exit 1
+      fi
+      emit "P2P_RESULT=PASS"; exit 0 ;;
     *部分连通*) emit "P2P_RESULT=WARN_PARTIAL（不可达的 GPU 对会回退 CPU 中转，BIOS 关 ACS 后重测）"; exit 6 ;;
     *全不可达*) emit "P2P_RESULT=FAIL_NOP2P（必须 BIOS 关 ACS/IOMMU，否则 P2P 全走 CPU）"; exit 7 ;;
     *) emit "P2P_RESULT=UNKNOWN（日志里没有判读行，多半是某段 STAGE_FAIL，看 $OUT）"; exit 9 ;;
@@ -85,6 +98,10 @@ if [ "${PARSE_ONLY:-0}" = "1" ]; then
   parse_and_verdict
 fi
 
+# 防"把使用者既有文件当日志截掉"：已存在且非空时只允许覆盖 *.log
+if [ -s "$OUT" ]; then
+  case "$OUT" in *.log) : ;; *) echo "!! OUT 指向已存在的非空文件且不是 .log，拒绝覆盖：$OUT"; exit 2 ;; esac
+fi
 mkdir -p "$(dirname "$OUT")" 2>/dev/null || { echo "!! 建不了日志目录 $(dirname "$OUT")"; exit 2; }
 : > "$OUT" || { echo "!! 写不了日志 $OUT"; exit 2; }
 [ -f "$SRC/p2p_check.py" ] || { emit "P2P_SKIP 套件目录缺 p2p_check.py: $SRC"; exit 3; }
@@ -115,10 +132,16 @@ case "$GRC" in
 esac
 
 # ---------- 后端判定 ----------
-ok_docker(){ have docker && timeout 10 docker info >/dev/null 2>&1 \
-  && timeout 10 docker info -f '{{json .Runtimes}}' 2>/dev/null | grep -aq nvidia; }
-ok_podman(){ have podman && timeout 15 podman info >/dev/null 2>&1 \
-  && ls /etc/cdi/*.json /run/cdi/*.json /var/run/cdi/*.json 2>/dev/null | head -1 | grep -q .; }
+# 部分最小系统没有 coreutils timeout；缺了就直接跑，别把"没 timeout"报成"连不上守护进程"
+tmo(){ if have timeout; then timeout "$@"; else shift; "$@"; fi; }
+# nvidia-ctk 默认生成的是 nvidia.yaml，只 glob *.json 会让 podman 后端永远认不出来
+cdi_present(){ ls /etc/cdi/*.json /etc/cdi/*.yaml /etc/cdi/*.yml \
+                /run/cdi/*.json /run/cdi/*.yaml /var/run/cdi/*.json /var/run/cdi/*.yaml 2>/dev/null | head -1 | grep -q .; }
+# 与 env-check 同一口径：runtimes 含 nvidia，或 nvidia-ctk + CDI 兜底（否则门禁放行、这里 exit 4）
+ok_docker(){ have docker && tmo 10 docker info >/dev/null 2>&1 \
+  && { tmo 10 docker info -f '{{json .Runtimes}}' 2>/dev/null | grep -aq nvidia \
+       || { have nvidia-ctk && cdi_present; }; } }
+ok_podman(){ have podman && tmo 15 podman info >/dev/null 2>&1 && cdi_present; }
 NATIVE_PY=""
 ok_native(){
   local c
@@ -167,7 +190,10 @@ fi
 # 只换 registry 前缀、不换 tag，避免拉回来一个版本不同的镜像还以为同源。
 img_candidates(){
   printf '%s\n' "$TORCH_IMG"
-  case "$TORCH_IMG" in */*) return 0 ;; esac
+  # 首段含 . 或 :（或 localhost）才算绝对地址；基线 pytorch/pytorch:tag 的首段是组织名，
+  # 早先按"有没有斜杠"判会让 mirror 前缀对默认镜像整体失效——而它正是打印给使用者的那条补救命令
+  first="${TORCH_IMG%%/*}"; [ "$first" = "$TORCH_IMG" ] && return 0
+  case "$first" in localhost|*.*|*:*) return 0 ;; esac
   [ -n "${P2P_IMAGE_MIRRORS:-}" ] || return 0
   local m
   for m in $(printf '%s' "$P2P_IMAGE_MIRRORS" | tr ',' ' '); do
@@ -177,15 +203,18 @@ img_candidates(){
 }
 REF=""
 if [ "$RUN_MODE" = container ]; then
-  for c in $(img_candidates); do
+  # while read 而不是 for $(...)：引用里出现空格或 * 时，词分割与路径展开会造出凭空的候选
+  while IFS= read -r c; do
     "$ENGINE" image inspect "$c" >/dev/null 2>&1 && { REF="$c"; break; }
-  done
+  done < <(img_candidates)
   if [ -z "$REF" ] && [ "$PULL" = 1 ]; then
-    for c in $(img_candidates); do
+    while IFS= read -r c; do
       emit "P2P_PULL_BEGIN $c"
-      if "$ENGINE" pull "$c" 2>&1 | tee -a "$OUT"; then REF="$c"; emit "P2P_PULL_OK $c"; break
+      "$ENGINE" pull "$c" 2>&1 | tee -a "$OUT"
+      # 管道后 $? 是 tee 的状态；不取 PIPESTATUS 就会把失败的拉取记成 P2P_PULL_OK
+      if [ "${PIPESTATUS[0]}" = 0 ]; then REF="$c"; emit "P2P_PULL_OK $c"; break
       else emit "P2P_PULL_FAIL $c"; fi
-    done
+    done < <(img_candidates)
   fi
   if [ -z "$REF" ]; then
     emit "P2P_RESULT=SKIP_NO_IMAGE（本地没有 torch 镜像，且未开 --pull）"
@@ -206,6 +235,8 @@ if [ "$RUN_MODE" = native ]; then
   emit "P2P_PYBIN=$NATIVE_PY"
   RUN_MODE=native PYBIN="$NATIVE_PY" NCCL_DEBUG="$NCCL_DEBUG" bash "$INSIDE" 2>&1 | tee -a "$OUT"
   RC=${PIPESTATUS[0]}
+# 代价（与在役那条线口径一致，保留但写清楚）：--ipc=host 让容器看得见宿主 SysV 共享内存段，
+# 且容器以 root 跑第三方镜像；只读挂载与"有计算进程就避让"是缓解，不是隔离。
 elif [ "$ENGINE" = docker ]; then
   docker run --rm --gpus all --ipc=host \
     --ulimit memlock=-1 --ulimit stack=67108864 \

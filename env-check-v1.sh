@@ -22,7 +22,7 @@ say(){ printf '%s\n' "$*"; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 # "真能跑才认"：命令存在不等于能用（坏软链、半截 venv、Windows 商店别名都会存在但 rc≠0）
 run_ok(){ "$@" >/dev/null 2>&1; }
-tmo(){ timeout "$1" "${@:2}" 2>/dev/null; }
+tmo(){ if have timeout; then timeout "$1" "${@:2}" 2>/dev/null; else shift; "$@" 2>/dev/null; fi; }
 osrel_get(){ grep -m1 "^$1=" "${OSREL:-/etc/os-release}" 2>/dev/null | cut -d= -f2- | tr -d '"'; }
 
 D_N=0; B_N=0; D_LIST=""; B_LIST=""
@@ -116,7 +116,7 @@ fi
 
 if have podman; then
   if tmo 15 podman info; then
-    if ls /etc/cdi/*.json /var/run/cdi/*.json /run/cdi/*.json 2>/dev/null | head -1 | grep -q .; then
+    if ls /etc/cdi/*.json /etc/cdi/*.yaml /etc/cdi/*.yml /var/run/cdi/*.json /var/run/cdi/*.yaml /run/cdi/*.json /run/cdi/*.yaml 2>/dev/null | head -1 | grep -q .; then
       B_PODMAN=yes; aligned podman "可用且已有 CDI 规格（--device nvidia.com/gpu=all 的前提）"
     else
       note "podman 可用但无 CDI 规格 → 需 sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml 才能在容器内看到 GPU"
@@ -144,7 +144,9 @@ fi
 say "===== 3. 驱动与 GPU（只报要求，不给安装命令） ====="
 NGPU=""
 if have nvidia-smi; then
-  NGPU=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ')
+  # 计数走 query 接口；-L 的前缀格式一变，grep 会恒 0 → 假 BLOCK
+  NGPU=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | grep -c .)
+  [ "${NGPU:-0}" != 0 ] || NGPU=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ')
   DRV=$(tmo 10 nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1 | tr -d ' ')
   GN=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
   GM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1)
@@ -153,10 +155,12 @@ if have nvidia-smi; then
   say "要求：宿主驱动 ≥570（CUDA 12.9 下限），参考 580.173.02；驱动与 libnvidia-api 配套，换驱动需重新核对。"
   say "      驱动/CUDA 的安装与排错请使用者按自己机型自行处理，本脚本刻意不给命令（装错驱动会打挂在役机器）。"
   DM=${DRV%%.*}
+  case "$DM" in ''|*[!0-9]*) DM=unknown ;; esac
   if [ -z "$NGPU" ] || [ "$NGPU" = 0 ]; then
     block nvidia_smi "nvidia-smi 在但读不到 GPU（驱动未加载 / 设备节点缺失）→ 先跑 sudo nvidia-smi 自查"
   else
-    if [ "${DM:-0}" -ge 570 ] 2>/dev/null; then
+    if [ "$DM" = unknown ]; then drift driver "版本读不出（${DRV:-空}）：无法与参考比对，请手工核对 nvidia-smi"
+    elif [ "$DM" -ge 570 ] 2>/dev/null; then
       [ "$DRV" = 580.173.02 ] && aligned driver "$DRV（与参考逐字一致）" || drift driver "$DRV（≥570 可跑，参考 580.173.02）"
     else
       block driver "$DRV（<570，低于 CUDA 12.9 下限）"
@@ -167,9 +171,11 @@ if have nvidia-smi; then
       block gpu_count "$NGPU（P2P/NCCL 带宽测试至少需 2 卡）"
     fi
     case "$GN" in *T10*) aligned gpu_model "$GN" ;; *) drift gpu_model "${GN:-未知}（参考 Tesla T10：PCIe 代际与链路宽度不同，带宽上限不同）" ;; esac
+  NUNAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sort -u | grep -c .)
+  [ "${NUNAME:-1}" = 1 ] || drift gpu_mix "机型不统一（$NUNAME 种）：上面取的是第一张卡，不代表全部"
     [ "$SM" = 7.5 ] || drift compute_cap "${SM:-未知}（参考 7.5）"
   fi
-  BUSY=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l)
+  BUSY=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c .)
   [ "$BUSY" = 0 ] || note "GPU 上有 $BUSY 个计算进程在跑：run_all-v2.sh 会避让（不抢卡）"
 else
   block nvidia_smi "宿主机没有 nvidia-smi：容器内也拿不到 GPU（nvidia-container-toolkit 依赖宿主驱动）"
@@ -207,8 +213,7 @@ else
   fi
   # vllm 落点：层 3 补丁的 FileNotFoundError 就靠这两行一次定位
   if run_ok "$PY" -c 'import vllm'; then
-    note "vllm.__file__=$("$PY" -c 'import vllm,os;print(vllm.__file__)' 2>/dev/null)"
-    note "qwen4_exp 是否存在：$("$PY" -c 'import vllm,os;p=os.path.join(os.path.dirname(vllm.__file__),"models","qwen4_exp");print(p+(" 在" if os.path.isdir(p) else " 不在"))' 2>/dev/null)"
+    note "vllm.__file__=$("$PY" -c 'import vllm,os;print(vllm.__file__)' 2>/dev/null)（本机装了 vllm 时才打，供同机部署脚本定位包路径）"
   fi
 fi
 for p in "/usr/lib/${MULTIARCH}" /usr/local/cuda/lib64 /usr/local/cuda-12/lib64; do

@@ -18,7 +18,10 @@ if [ -z "$PY" ]; then
 fi
 [ -n "$PY" ] || { echo "STAGE_FAIL no-python（本机/本镜像没有能真跑起来的 python3）"; exit 2; }
 "$PY" -c 'import torch' >/dev/null 2>&1 || { echo "STAGE_FAIL torch-import（$PY 里没有 torch）"; exit 2; }
-NG=$("$PY" -c 'import torch;print(torch.cuda.device_count())' 2>/dev/null || echo 0)
+# tail -1 + 数字校验：torch 首次 import 往 stdout 多吐一行就会让 NG 变成多词值，
+# 后面的 [ -ge ] 直接报错，整轮被误判成"看不到 GPU"
+NG=$("$PY" -c 'import torch;print(torch.cuda.device_count())' 2>/dev/null | tail -1 || echo 0)
+case "$NG" in ''|*[!0-9]*) NG=0 ;; esac
 [ "${NG:-0}" -ge 1 ] || { echo "STAGE_FAIL no-visible-gpu（torch.cuda.device_count()=$NG）"; exit 2; }
 
 echo "RUN_MODE=${RUN_MODE:-unknown}  python=$("$PY" -c 'import sys;print(sys.version.split()[0])')  torch=$("$PY" -c 'import torch;print(torch.__version__)')  torch_cuda=$("$PY" -c 'import torch;print(torch.version.cuda or "none")')  gpus=$NG"

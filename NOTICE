@@ -13,4 +13,5 @@ NVIDIA drivers, CUDA, cuDNN, NCCL and PyTorch images are third-party work under 
 own licenses. This repository bundles none of them; the runner pulls a public PyTorch
 container image only when you explicitly ask it to (--pull).
 
-No warranty is provided; see LICENSE Sections 11 and 13.
+No warranty is provided; see the LICENSE file (its warranty disclaimer and
+limitation-of-liability clauses).
