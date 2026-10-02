@@ -110,11 +110,12 @@ OUT=<已有日志> PARSE_ONLY=1 bash run_all-v2.sh   # 只解析不跑卡，绝�
 ## 自测与验证状态
 
 ```bash
-bash selftest-v1.sh     # 49 条断言：发行版分支、三档判定、后端判定、判读解析五档、参数与早退、
-#                       mirror 前缀生效、pull 失败不记成功、OUT 防误覆盖、镜像名注入、floor 无数据、段失败降级
+bash selftest-v1.sh     # 63 条断言：发行版分支、三档判定、后端判定、判读解析五档、参数与早退、
+#                       mirror 前缀生效、pull 失败不记成功、OUT 防误覆盖、镜像名注入与合法引用不误杀、
+#                       floor 无数据、段失败降级、本地镜像命中、驱动版本读不出、机型不统一、torch 噪声行
 ```
 
-已过：`bash -n` 全量、`py_compile`、上述 49 条断言。
+已过：`bash -n` 全量、`py_compile`、上述 63 条断言。
 **未验**（需要实机）：Debian 与 Ubuntu 真机、podman CDI 路径、原生模式跑通、真实 `docker pull` 行为。
 
 ## 许可

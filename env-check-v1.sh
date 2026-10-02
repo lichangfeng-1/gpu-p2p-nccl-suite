@@ -98,7 +98,9 @@ if have docker; then
       if printf '%s' "$RTS" | grep -aq nvidia; then
         aligned gpu_runtime "docker runtimes 含 nvidia"
       elif have nvidia-ctk || have nvidia-container-runtime; then
-        note "docker runtimes 未列 nvidia，但 nvidia-ctk/nvidia-container-runtime 在 PATH（CDI 或旧配置形态，起容器时自验）"
+        # --gpus all 需要 runtime 注册进 daemon；只装 toolkit 不配置，容器照样看不到卡
+        drift gpu_runtime "docker 在但 runtimes 未注册 nvidia（--gpus all 会失败）→ sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker"
+        B_DOCKER=no
       else
         block gpu_runtime "docker 在但缺 nvidia-container-toolkit（--gpus all 必失败）→ 见第 5 节命令卡"
         NEED_CTK=yes
@@ -211,7 +213,7 @@ else
   else
     note "本机无 torch → 原生模式不可用，需要它时自行 pip 安装（国内请先 export PIP_INDEX_URL=<你自己选定的镜像>）"
   fi
-  # vllm 落点：层 3 补丁的 FileNotFoundError 就靠这两行一次定位
+  # vllm 落点：同机部署脚本找不到补丁目标文件时，靠这一行定位
   if run_ok "$PY" -c 'import vllm'; then
     note "vllm.__file__=$("$PY" -c 'import vllm,os;print(vllm.__file__)' 2>/dev/null)（本机装了 vllm 时才打，供同机部署脚本定位包路径）"
   fi

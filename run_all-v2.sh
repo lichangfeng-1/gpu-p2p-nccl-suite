@@ -13,7 +13,8 @@
 #      本地已有即用；没有只打 pull 命令卡，真下不下 10 GiB 由 --pull 决定（不静默起大下载）。
 #   4) 去掉 -it、套件只读挂载（容器以 root 跑，可写挂载等于让一次体检有能力改宿主脚本）、日志落盘。
 #   5) 退出码与同族 p2p-suite-run v3 对齐：
-#      0 全连通 / 3 跳过未跑 / 4 无可用后端 / 6 部分连通 / 7 全不可达 / 8 低于下限 / 9 无判读行。
+#      0 全连通 / 1 连通性通过但有 STAGE_FAIL 段 / 2 用法或落盘错误 / 3 跳过未跑 /
+#      4 无可用后端 / 6 部分连通 / 7 全不可达 / 8 低于下限（含设了阈值却没数据）/ 9 无判读行。
 #   6) PARSE_ONLY=1 OUT=<已有日志> 只做解析不碰 GPU/docker——离线单测判读正则用，与 v3 同口子。
 #
 # 用法：bash run_all-v2.sh [--backend=auto|docker|podman|native] [--pull] [--allow-drift] [--yes]
@@ -137,10 +138,11 @@ tmo(){ if have timeout; then timeout "$@"; else shift; "$@"; fi; }
 # nvidia-ctk 默认生成的是 nvidia.yaml，只 glob *.json 会让 podman 后端永远认不出来
 cdi_present(){ ls /etc/cdi/*.json /etc/cdi/*.yaml /etc/cdi/*.yml \
                 /run/cdi/*.json /run/cdi/*.yaml /var/run/cdi/*.json /var/run/cdi/*.yaml 2>/dev/null | head -1 | grep -q .; }
-# 与 env-check 同一口径：runtimes 含 nvidia，或 nvidia-ctk + CDI 兜底（否则门禁放行、这里 exit 4）
+# docker 的 --gpus all 走的是 daemon 里注册的 nvidia runtime，不读 CDI：
+# 用 nvidia-ctk+CDI 兜底会把"干净的 exit 4"变成"容器起不来 rc=9"，所以判据不收它。
+# podman 才走 CDI（cdi_present），两条路各用各的判据，不共用。
 ok_docker(){ have docker && tmo 10 docker info >/dev/null 2>&1 \
-  && { tmo 10 docker info -f '{{json .Runtimes}}' 2>/dev/null | grep -aq nvidia \
-       || { have nvidia-ctk && cdi_present; }; } }
+  && tmo 10 docker info -f '{{json .Runtimes}}' 2>/dev/null | grep -aq nvidia; }
 ok_podman(){ have podman && tmo 15 podman info >/dev/null 2>&1 && cdi_present; }
 NATIVE_PY=""
 ok_native(){
@@ -179,6 +181,10 @@ else
   fi
 fi
 emit "P2P_BACKEND=${ENGINE:-none}  P2P_RUN_MODE=$RUN_MODE"
+# 降级别只是"换了个后端"，要把缺的那一步说清楚
+if have docker && ! ok_docker && have nvidia-ctk; then
+  emit "P2P_HINT=docker 在但没注册 nvidia runtime（--gpus all 会失败）：sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker"
+fi
 
 # ---------- GPU 避让（不抢在役引擎的卡） ----------
 if have nvidia-smi && [ -n "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | head -1)" ]; then
@@ -196,21 +202,23 @@ img_candidates(){
   case "$first" in localhost|*.*|*:*) return 0 ;; esac
   [ -n "${P2P_IMAGE_MIRRORS:-}" ] || return 0
   local m
-  for m in $(printf '%s' "$P2P_IMAGE_MIRRORS" | tr ',' ' '); do
+  # 同样走 while read：for $(...) 会让域名里的 * 被当前目录文件名展开
+  while IFS= read -r m; do
     m="${m%/}"; [ -n "$m" ] && printf '%s/%s\n' "$m" "$TORCH_IMG"
-  done
+  done < <(printf '%s\n' "$P2P_IMAGE_MIRRORS" | tr ',' '\n')
   return 0
 }
 REF=""
 if [ "$RUN_MODE" = container ]; then
   # while read 而不是 for $(...)：引用里出现空格或 * 时，词分割与路径展开会造出凭空的候选
   while IFS= read -r c; do
-    "$ENGINE" image inspect "$c" >/dev/null 2>&1 && { REF="$c"; break; }
+    # </dev/null：docker/podman 的 inspect 会读 stdin，不掐掉会吃掉循环要读的下一行
+    "$ENGINE" image inspect "$c" >/dev/null 2>&1 </dev/null && { REF="$c"; break; }
   done < <(img_candidates)
   if [ -z "$REF" ] && [ "$PULL" = 1 ]; then
     while IFS= read -r c; do
       emit "P2P_PULL_BEGIN $c"
-      "$ENGINE" pull "$c" 2>&1 | tee -a "$OUT"
+      "$ENGINE" pull "$c" </dev/null 2>&1 | tee -a "$OUT"
       # 管道后 $? 是 tee 的状态；不取 PIPESTATUS 就会把失败的拉取记成 P2P_PULL_OK
       if [ "${PIPESTATUS[0]}" = 0 ]; then REF="$c"; emit "P2P_PULL_OK $c"; break
       else emit "P2P_PULL_FAIL $c"; fi

@@ -259,25 +259,30 @@ def main():
 
     print("\n=== C. 直接 P2P 单向 vs 双向 (1 GiB, 两个设备各自的流) ===")
     print(f"{'pair':>7} | {'uni GB/s':>9} | {'A->B':>7} | {'B->A':>7} | {'bidir agg':>10}")
-    uni_ref = 0.0
+    uni_ref = None
     for p in (pix, node):
         if not p:
             continue
         i, j = p
         u = p2p_uni(i, j, GB)
         ra, rb, agg = p2p_bidir(i, j, GB)
-        if uni_ref == 0.0:
+        if uni_ref is None:
             uni_ref = u
         print(f"{str(i)+'->'+str(j):>7} | {u:>9.2f} | {ra:>7.2f} | {rb:>7.2f} | {agg:>10.2f}")
 
     print("\n=== D. 4 对并发单向 (每对 1 GiB) ===")
-    if ng >= 8:
-        pairs4 = [(0, 1), (2, 3), (4, 5), (6, 7)]
+    # 单卡时 pairs4 为空，concurrent_pairs 里的 max() 会抛 ValueError（G 段有守卫，D 段漏了）
+    if ng < 2:
+        print("跳过：单卡无并发链路可测")
     else:
-        pairs4 = [(k, k + 1) for k in range(0, ng - 1, 2)]
-    agg4 = concurrent_pairs(pairs4, GB)
-    print(f"pairs={pairs4}")
-    print(f"聚合带宽 = {agg4:.2f} GB/s  (单对实测≈{uni_ref:.2f}; ≈对数×单对 → 每链路独立)")
+        if ng >= 8:
+            pairs4 = [(0, 1), (2, 3), (4, 5), (6, 7)]
+        else:
+            pairs4 = [(k, k + 1) for k in range(0, ng - 1, 2)]
+        agg4 = concurrent_pairs(pairs4, GB)
+        ref = f"{uni_ref:.2f}" if uni_ref else "NA(C 段未跑成)"
+        print(f"pairs={pairs4}")
+        print(f"聚合带宽 = {agg4:.2f} GB/s  (单对实测≈{ref}; ≈对数×单对 → 每链路独立)")
 
     print("\n=== E. 直接 P2P vs host-staged (1 GiB) ===")
     if pix:
@@ -298,8 +303,10 @@ def main():
         aggb = bidir_multi_pairs(pairs2, GB)
         print(f"pairs={pairs2} 各跑双向, 共 4 个方向")
         print(f"聚合带宽 = {aggb:.2f} GB/s")
-        print(f"判读: ≈{2*uni_ref:.0f}(=2×{uni_ref:.2f}) → 每物理链路总量≈{uni_ref:.2f}, 非全双工; "
-              f"≈{4*uni_ref:.0f}(=4×{uni_ref:.2f}) → 每向各 {uni_ref:.2f}(全双工), C 段的串行化是软件行为。")
+        ref = uni_ref if uni_ref else 0.0
+        tail = "" if uni_ref else "  [基准缺失：C 段未跑成，下面两个数是 0，别当结论]"  # noqa: E501
+        print(f"判读: ≈{2*ref:.0f}(=2×{ref:.2f}) → 每物理链路总量≈{ref:.2f}, 非全双工; "
+              f"≈{4*ref:.0f}(=4×{ref:.2f}) → 每向各 {ref:.2f}(全双工), C 段的串行化是软件行为。{tail}")
 
 
 if __name__ == "__main__":

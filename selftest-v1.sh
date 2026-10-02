@@ -41,10 +41,10 @@ cat > "$T/bin/nvidia-smi" <<'EOS'
 case "$*" in
   *query-compute-apps*) exit 0 ;;
   *-L*) for i in 0 1 2 3 4 5 6 7; do echo "GPU $i: Tesla T10 (UUID: GPU-stub-$i)"; done ;;
-  *driver_version*) echo "580.173.02" ;;
+  *driver_version*) echo "${STUB_DRV:-580.173.02}" ;;
   *memory.total*) echo "16384" ;;
   *compute_cap*) echo "7.5" ;;
-  *name*) echo "Tesla T10" ;;
+  *name*) if [ "${STUB_MIX:-0}" = 1 ]; then echo "Tesla T10"; echo "NVIDIA A100"; else echo "Tesla T10"; fi ;;
   *index*) for i in 0 1 2 3 4 5 6 7; do echo "$i"; done ;;
   *topo*) echo "GPU0 stub topo" ;;
   *) exit 0 ;;
@@ -61,7 +61,7 @@ case "$code" in
   *sys.prefix*) echo /usr/local; exit 0 ;;
   *torch.__version__*) [ "${STUB_PY:-ok312}" = notorch ] && exit 1; echo 2.4.1; exit 0 ;;
   *cuda.is_available*) [ "${STUB_PY:-ok312}" = notorch ] && exit 1; echo "${STUB_CUDA:-1}"; exit 0 ;;
-  *device_count*) echo 8; exit 0 ;;
+  *device_count*) [ "${STUB_PY:-ok312}" = noise ] && echo "UserWarning: stub noise"; echo 8; exit 0 ;;
   *version.split*) echo 3.12.3; exit 0 ;;
   *assert*) [ "${STUB_PY:-ok312}" = notorch ] && exit 1; exit 0 ;;
   *) exit 0 ;;
@@ -189,6 +189,45 @@ fix "$T/sf.log" "   0->1 |       13.16 |        6.59 |       13.15" "    32MiB |
 printf 'STAGE_FAIL NCCL BANDWIDTH (all_reduce, all GPUs)\n' >> "$T/sf.log"
 OUT="$T/sf.log" PARSE_ONLY=1 bash "$SRC/run_all-v2.sh" > "$T/t14.out" 2>&1; chk T14 1 $?
 has "降级结论行" "$T/sf.log" "PASS_WITH_STAGE_FAILS"
+
+echo "=== T15 本地已有镜像：REF 命中（覆盖 while-read 里 break 与赋值不丢） ==="
+L="$T/t15.log"
+STUB_DOCKER=ok OSREL="$T/osrel.ubuntu2404" OUT="$L" bash "$SRC/run_all-v2.sh" --yes > "$T/t15.out" 2>&1
+has "P2P_IMAGE_REF 命中" "$L" "P2P_IMAGE_REF=pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime"
+
+echo "=== T16 合法镜像引用不被白名单误杀（带端口 registry + digest） ==="
+L="$T/t16.log"
+TORCH_IMG='reg.example:5000/org/img@sha256:aaaa1111' STUB_DOCKER=ok OSREL="$T/osrel.ubuntu2404" OUT="$L" \
+  bash "$SRC/run_all-v2.sh" --yes > "$T/t16.out" 2>&1; rc=$?
+[ "$rc" = 2 ] && { echo "FAIL T16 合法引用被拒"; FAIL=$((FAIL+1)); } || { echo "PASS T16 未被误拒 rc=$rc"; PASS=$((PASS+1)); }
+has "REF 用了指定的 digest 引用" "$L" "P2P_IMAGE_REF=reg.example:5000/org/img@sha256:aaaa1111"
+
+echo "=== T17 驱动版本读不出 → DRIFT 而非 BLOCK ==="
+L="$T/t17.log"
+STUB_DRV=n/a OSREL="$T/osrel.ubuntu2404" bash "$SRC/env-check-v1.sh" > "$L" 2>&1; chk T17 0 $?
+has "driver DRIFT" "$L" "DRIFT   driver"
+
+echo "=== T18 机型不统一 → gpu_mix DRIFT（head -1 代表不了全部） ==="
+L="$T/t18.log"
+STUB_MIX=1 OSREL="$T/osrel.ubuntu2404" bash "$SRC/env-check-v1.sh" > "$L" 2>&1; chk T18 0 $?
+has "gpu_mix DRIFT" "$L" "DRIFT   gpu_mix"
+
+echo "=== T19 执行体：torch 往 stdout 多吐一行也不能误判成无 GPU ==="
+L="$T/t19.out"
+STUB_PY=noise PYBIN=python3 RUN_MODE=native bash "$SRC/run_suite-inside-v1.sh" > "$L" 2>&1
+if grep -aq "no-visible-gpu" "$L"; then echo "FAIL T19 噪声行导致误判"; FAIL=$((FAIL+1)); else echo "PASS T19 未误判"; PASS=$((PASS+1)); fi
+has "gpus=8 被正确解析" "$L" "gpus=8"
+
+echo "=== T20 docker 在但 runtime 未注册：门禁记漂移，运行器降级并给补齐命令 ==="
+printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/nvidia-ctk"; chmod +x "$T/bin/nvidia-ctk"
+L="$T/t20.log"
+STUB_DOCKER=no_runtime OSREL="$T/osrel.ubuntu2404" bash "$SRC/env-check-v1.sh" > "$L" 2>&1; chk T20a 0 $?
+has "gpu_runtime DRIFT" "$L" "DRIFT   gpu_runtime"; has "docker 后端关闭" "$L" "BACKEND_DOCKER=no"
+has "建议后端降级" "$L" "SUGGESTED_BACKEND=native"
+L2="$T/t20b.log"
+STUB_DOCKER=no_runtime OSREL="$T/osrel.ubuntu2404" OUT="$L2" bash "$SRC/run_all-v2.sh" --yes > "$T/t20b.out" 2>&1
+has "补齐命令提示" "$L2" "nvidia-ctk runtime configure --runtime=docker"
+rm -f "$T/bin/nvidia-ctk"
 
 echo ""
 echo "PASS=$PASS FAIL=$FAIL"
