@@ -1,0 +1,5 @@
+p2p-suite-*.log
+pull.log
+__pycache__/
+*.pyc
+*.pyo

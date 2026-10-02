@@ -1,0 +1,16 @@
+Copyright 2026 P2P/NCCL 体检套件 contributors
+
+The P2P/NCCL test suite in this repository (p2p_check.py, p2p_bandwidth.py,
+nccl_bandwidth.py, multistream_p2p.py, diag_p2p.py, p2putil.py and the shell drivers)
+is original work distributed under the Apache License, Version 2.0 (see LICENSE).
+
+Reference-environment values quoted in the docs (Ubuntu 24.04 / docker 29.8.0 /
+driver 580.173.02 / 8x Tesla T10 / python 3.12) are measurements from one specific
+server, recorded 2026-10-01. They are evidence for the alignment gates, not
+requirements, and not a claim about your hardware.
+
+NVIDIA drivers, CUDA, cuDNN, NCCL and PyTorch images are third-party work under their
+own licenses. This repository bundles none of them; the runner pulls a public PyTorch
+container image only when you explicitly ask it to (--pull).
+
+No warranty is provided; see LICENSE Sections 11 and 13.

@@ -1,0 +1,11 @@
+# 行尾强制 LF：这些 .sh 与 .py 是给 Linux 跑的，Windows 上 clone 若被转成 CRLF，
+# bash 会嫌 ^M；自测与解析都按字节比对，行尾一飘就假报警。
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+LICENSE text eol=lf
+NOTICE text eol=lf
+*.png binary
+*.jpg binary
